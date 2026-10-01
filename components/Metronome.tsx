@@ -17,9 +17,7 @@ export default function Metronome() {
     useEffect(() => {
         if (active) {
             flash()
-            const int = createBPMInterval(() => {
-                flash()
-            }, bpm)
+            const int = createBPMInterval(flash, bpm)
             setIntervalId(int)
         }
     }, [bpm, active])

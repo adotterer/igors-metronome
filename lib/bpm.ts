@@ -1,7 +1,7 @@
 // make a function that takes BPM and makes the approriate set Interval timing in milliseconds
 
 export function translateToMilliseconds(bpm: number): number {
-    const milliseconds = (bpm / 60) * 1000
+    const milliseconds = (60 / bpm) * 1000
     return milliseconds
 }
 
