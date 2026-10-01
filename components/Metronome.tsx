@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from 'react'
-
+import Pulser from "./Pulser"
 /* 
 
 Play button
@@ -30,6 +30,7 @@ export default function Metronome() {
         <label htmlFor='bpm'>BPM</label>
         <button onClick={() => setBPM(bpm + 1)}>UP</button>
         </div>
+        <Pulser />
 
 
     </div>
