@@ -1,61 +1,119 @@
 "use client"
 
-import { useState, useEffect, useRef, useMemo } from 'react'
-import { createBPMInterval } from '@/lib/bpm'
+import { useState, useEffect, useRef } from 'react'
+import { beatsUntil, bpmFromTaps } from '@/lib/bpm'
 import { FaPlay, FaStop, FaAngleUp, FaAngleDown } from "react-icons/fa";
+
+// The scheduler wakes up every SCHEDULER_INTERVAL_MS and books any clicks due in the
+// next LOOKAHEAD_SECONDS on the audio clock. setInterval can fire late, but as long as
+// it's late by less than the lookahead, the clicks still play exactly on time.
+const SCHEDULER_INTERVAL_MS = 25
+const LOOKAHEAD_SECONDS = 0.1
+
+function playClick(ctx: AudioContext, buffer: AudioBuffer, time: number): AudioBufferSourceNode {
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(ctx.destination)
+    source.start(time)
+    return source
+}
 
 export default function Metronome() {
     const [bpm, setBPM] = useState(60)
     const [active, setActive] = useState(false)
     const [pulseClass, setPulseClass] = useState("")
-    const [intervalId, setIntervalId] = useState<ReturnType<typeof setInterval> | undefined>()
-    const [taps, setTaps] = useState<number[]>([])
-    const audioRef = useRef<HTMLAudioElement | null>(null)
-    function playSound() {
-        if (!audioRef.current) {
-            audioRef.current = new Audio("/click.mp3")
-        }
-        audioRef.current.currentTime = 0
-        audioRef.current.play().catch((er) => console.error("Audio playback failed:", er))
+    const ctxRef = useRef<AudioContext | null>(null)
+    const bufferRef = useRef<AudioBuffer | null>(null)
+    const taps = useRef<number[]>([])
 
+    // Browsers only let audio start from a user gesture, so call this from click handlers.
+    // Loads and decodes the click once, so every beat after that plays with no delay.
+    async function ensureAudio() {
+        if (!ctxRef.current) {
+            ctxRef.current = new AudioContext()
+        }
+        const ctx = ctxRef.current
+        if (ctx.state === "suspended") {
+            await ctx.resume()
+        }
+        if (!bufferRef.current) {
+            const res = await fetch("/click.mp3")
+            bufferRef.current = await ctx.decodeAudioData(await res.arrayBuffer())
+        }
+        return { ctx, buffer: bufferRef.current }
     }
-    function flash() {
-        playSound()
-        setPulseClass("bg-fuchsia-500")
-        setTimeout(() => setPulseClass("bg-transparent"), 100)
+
+    async function playSound() {
+        try {
+            const { ctx, buffer } = await ensureAudio()
+            playClick(ctx, buffer, ctx.currentTime)
+        } catch (er) {
+            console.error("Audio playback failed:", er)
+        }
+    }
+
+    async function togglePlay() {
+        if (active) {
+            setActive(false)
+            return
+        }
+        try {
+            await ensureAudio()
+            setActive(true)
+        } catch (er) {
+            console.error("Audio playback failed:", er)
+        }
     }
 
     function calculateBPM() {
-        const startTime = Date.now()
-        setTaps((t) => [...t, startTime].slice(-5))
-    // push to [] the milliseconds. 
-    // find the difference between the last 5 "taps"
+        playSound()
+        taps.current = [...taps.current, performance.now()].slice(-5)
+        const tappedBPM = bpmFromTaps(taps.current)
+        if (tappedBPM) setBPM(tappedBPM)
     }
 
     useEffect(() => {
-        if(taps.length < 5) return
-        let differences = 0
-        differences += taps[1] - taps[0];
-        differences += taps[2] - taps[1];
-        differences += taps[3] - taps[2];
-        differences += taps[4] - taps[3];
-        const average = differences / 4
-        setBPM(Math.round(60000 / average))
-    },[taps])
+        const ctx = ctxRef.current
+        const buffer = bufferRef.current
+        if (!active || !ctx || !buffer) return
 
-    useEffect(() => {
-        if (active) {
-            flash()
-            const int = createBPMInterval(flash, bpm)
-            setIntervalId(int)
+        const sources = new Set<AudioBufferSourceNode>()
+        const flashTimeouts = new Set<ReturnType<typeof setTimeout>>()
+        const later = (fn: () => void, ms: number) => {
+            const t = setTimeout(() => {
+                flashTimeouts.delete(t)
+                fn()
+            }, ms)
+            flashTimeouts.add(t)
         }
-    }, [bpm, active])
 
-    useEffect(() => {
-        if (!active) {
-            clearInterval(intervalId)
+        let nextBeat = ctx.currentTime + 0.05
+        const schedule = () => {
+            const result = beatsUntil(nextBeat, ctx.currentTime + LOOKAHEAD_SECONDS, bpm)
+            nextBeat = result.nextBeat
+            for (const time of result.times) {
+                const source = playClick(ctx, buffer, time)
+                sources.add(source)
+                source.onended = () => sources.delete(source)
+                // Line the flash up with when the click actually sounds
+                later(() => {
+                    setPulseClass("bg-fuchsia-500")
+                    later(() => setPulseClass("bg-transparent"), 100)
+                }, Math.max(0, (time - ctx.currentTime) * 1000))
+            }
         }
-    }, [active, intervalId])
+
+        schedule()
+        const id = setInterval(schedule, SCHEDULER_INTERVAL_MS)
+
+        return () => {
+            clearInterval(id)
+            flashTimeouts.forEach(clearTimeout)
+            // Silence clicks that were booked ahead but haven't played yet
+            sources.forEach((s) => s.stop())
+            setPulseClass("bg-transparent")
+        }
+    }, [active, bpm])
 
     return <div className="p-4 align-center flex flex-col border items-center gap-6">
         <div className="flex gap-4 items-center">
@@ -82,7 +140,7 @@ export default function Metronome() {
             }}><FaAngleUp /></button>
         </div>
         <div className={"cursor-pointer w-[100px] h-[100px] border-1 rounded-full flex justify-center items-center " + pulseClass}
-            onClick={() => setActive(c => !c)}>
+            onClick={togglePlay}>
             {active ? <FaStop /> : <FaPlay />}
         </div>
         <div>
