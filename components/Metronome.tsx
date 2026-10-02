@@ -9,6 +9,8 @@ import { FaPlay, FaStop, FaAngleUp, FaAngleDown } from "react-icons/fa";
 // it's late by less than the lookahead, the clicks still play exactly on time.
 const SCHEDULER_INTERVAL_MS = 25
 const LOOKAHEAD_SECONDS = 0.1
+const FLASH_CLASS = "bg-fuchsia-500"
+const FLASH_MS = 100
 
 function playClick(ctx: AudioContext, buffer: AudioBuffer, time: number): AudioBufferSourceNode {
     const source = ctx.createBufferSource()
@@ -18,13 +20,25 @@ function playClick(ctx: AudioContext, buffer: AudioBuffer, time: number): AudioB
     return source
 }
 
+// Converts a time on the AudioContext clock into the performance.now() time when that
+// click actually comes out of the speakers. Sound reaches the speakers a bit after
+// the audio clock says it plays (much later for Bluetooth headphones).
+function heardAt(ctx: AudioContext, time: number): number {
+    const ts = ctx.getOutputTimestamp()
+    if (ts.contextTime !== undefined && ts.performanceTime) {
+        return ts.performanceTime + (time - ts.contextTime) * 1000
+    }
+    // Browsers without output timestamps: estimate from the reported latency
+    return performance.now() + (time - ctx.currentTime + ctx.baseLatency + (ctx.outputLatency ?? 0)) * 1000
+}
+
 export default function Metronome() {
     const [bpm, setBPM] = useState(60)
     const [active, setActive] = useState(false)
-    const [pulseClass, setPulseClass] = useState("")
     const ctxRef = useRef<AudioContext | null>(null)
     const bufferRef = useRef<AudioBuffer | null>(null)
     const taps = useRef<number[]>([])
+    const circleRef = useRef<HTMLDivElement>(null)
 
     // Browsers only let audio start from a user gesture, so call this from click handlers.
     // Loads and decodes the click once, so every beat after that plays with no delay.
@@ -75,17 +89,12 @@ export default function Metronome() {
     useEffect(() => {
         const ctx = ctxRef.current
         const buffer = bufferRef.current
-        if (!active || !ctx || !buffer) return
+        const circle = circleRef.current
+        if (!active || !ctx || !buffer || !circle) return
 
         const sources = new Set<AudioBufferSourceNode>()
-        const flashTimeouts = new Set<ReturnType<typeof setTimeout>>()
-        const later = (fn: () => void, ms: number) => {
-            const t = setTimeout(() => {
-                flashTimeouts.delete(t)
-                fn()
-            }, ms)
-            flashTimeouts.add(t)
-        }
+        // performance.now() times when each upcoming click will be heard
+        const flashes: number[] = []
 
         let nextBeat = ctx.currentTime + 0.05
         const schedule = () => {
@@ -95,23 +104,44 @@ export default function Metronome() {
                 const source = playClick(ctx, buffer, time)
                 sources.add(source)
                 source.onended = () => sources.delete(source)
-                // Line the flash up with when the click actually sounds
-                later(() => {
-                    setPulseClass("bg-fuchsia-500")
-                    later(() => setPulseClass("bg-transparent"), 100)
-                }, Math.max(0, (time - ctx.currentTime) * 1000))
+                flashes.push(heardAt(ctx, time))
             }
         }
 
         schedule()
         const id = setInterval(schedule, SCHEDULER_INTERVAL_MS)
 
+        // Flash on animation frames rather than timers, so it's tied to when the screen
+        // actually updates. Toggling the class directly skips a React re-render.
+        let lastFrame = performance.now()
+        let flashOffAt = 0
+        let raf = 0
+        const frame = (now: number) => {
+            const frameMs = Math.min(now - lastFrame, 50)
+            lastFrame = now
+            // This frame is shown about one frame from now, so light up the frame
+            // whose display time lands closest to when the click is heard.
+            let due = false
+            while (flashes.length && flashes[0] < now + frameMs * 1.5) {
+                flashes.shift()
+                due = true
+            }
+            if (due) {
+                circle.classList.add(FLASH_CLASS)
+                flashOffAt = now + FLASH_MS
+            } else if (flashOffAt && now >= flashOffAt) {
+                circle.classList.remove(FLASH_CLASS)
+                flashOffAt = 0
+            }
+            raf = requestAnimationFrame(frame)
+        }
+        raf = requestAnimationFrame(frame)
+
         return () => {
             clearInterval(id)
-            flashTimeouts.forEach(clearTimeout)
-            // Silence clicks that were booked ahead but haven't played yet
+            cancelAnimationFrame(raf)
             sources.forEach((s) => s.stop())
-            setPulseClass("bg-transparent")
+            circle.classList.remove(FLASH_CLASS)
         }
     }, [active, bpm])
 
@@ -139,7 +169,7 @@ export default function Metronome() {
                 setBPM(bpm + 1)
             }}><FaAngleUp /></button>
         </div>
-        <div className={"cursor-pointer w-[100px] h-[100px] border-1 rounded-full flex justify-center items-center " + pulseClass}
+        <div ref={circleRef} className="cursor-pointer w-[100px] h-[100px] border-1 rounded-full flex justify-center items-center"
             onClick={togglePlay}>
             {active ? <FaStop /> : <FaPlay />}
         </div>
